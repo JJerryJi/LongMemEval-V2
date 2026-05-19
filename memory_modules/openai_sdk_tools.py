@@ -21,7 +21,7 @@ from agents.editor import ApplyPatchOperation, ApplyPatchResult
 
 
 TRUNCATION_HINT = (
-    "Rerun with a narrower command: sed range, grep pattern, "
+    "Rerun with a narrower command: sed range, scoped rg pattern, "
     "inspect_trajectory.py --state/--span/--match."
 )
 
