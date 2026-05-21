@@ -17,6 +17,7 @@ from .memory import MemoryConfig, register_memory, require
 from .openai_sdk_runner import (
     OpenAISDKRunner,
     OpenAISDKRunnerConfig,
+    ensure_non_negative_int,
     ensure_positive_float,
     ensure_positive_int,
     ensure_string,
@@ -90,6 +91,35 @@ class AgentRunbookCOpenAISDK(AgentRunbookC):
             sdk_params.get("max_tool_output_chars"),
             field_name="query_openai_sdk_params.max_tool_output_chars",
         )
+        self.responses_transport = ensure_string(
+            sdk_params.get("responses_transport", "websocket"),
+            field_name="query_openai_sdk_params.responses_transport",
+        )
+        require(
+            self.responses_transport == "websocket",
+            "agentrunbook_c_openai_sdk only supports responses_transport='websocket'",
+        )
+        self.api_connect_timeout_seconds = ensure_positive_float(
+            sdk_params.get("api_connect_timeout_seconds", 15.0),
+            field_name="query_openai_sdk_params.api_connect_timeout_seconds",
+        )
+        self.api_read_timeout_seconds = ensure_positive_float(
+            sdk_params.get("api_read_timeout_seconds", 300.0),
+            field_name="query_openai_sdk_params.api_read_timeout_seconds",
+        )
+        self.api_write_timeout_seconds = ensure_positive_float(
+            sdk_params.get("api_write_timeout_seconds", 300.0),
+            field_name="query_openai_sdk_params.api_write_timeout_seconds",
+        )
+        self.api_pool_timeout_seconds = ensure_positive_float(
+            sdk_params.get("api_pool_timeout_seconds", 300.0),
+            field_name="query_openai_sdk_params.api_pool_timeout_seconds",
+        )
+        self.api_max_retries = ensure_non_negative_int(
+            sdk_params.get("api_max_retries", 0),
+            field_name="query_openai_sdk_params.api_max_retries",
+        )
+        self.sdk_fail_fast = True
         self.sdk_runner = OpenAISDKRunner(
             OpenAISDKRunnerConfig(
                 model=self.sdk_model,
@@ -100,6 +130,12 @@ class AgentRunbookCOpenAISDK(AgentRunbookC):
                 tool_timeout_seconds=self.tool_timeout_seconds,
                 max_tool_output_chars=self.max_tool_output_chars,
                 agent_name="AgentRunbookCOpenAISDK",
+                responses_transport=self.responses_transport,
+                api_connect_timeout_seconds=self.api_connect_timeout_seconds,
+                api_read_timeout_seconds=self.api_read_timeout_seconds,
+                api_write_timeout_seconds=self.api_write_timeout_seconds,
+                api_pool_timeout_seconds=self.api_pool_timeout_seconds,
+                api_max_retries=self.api_max_retries,
             )
         )
 
@@ -117,6 +153,13 @@ class AgentRunbookCOpenAISDK(AgentRunbookC):
                 "api_key_env": self.sdk_api_key_env,
                 "tool_timeout_seconds": self.tool_timeout_seconds,
                 "max_tool_output_chars": self.max_tool_output_chars,
+                "responses_transport": self.responses_transport,
+                "api_connect_timeout_seconds": self.api_connect_timeout_seconds,
+                "api_read_timeout_seconds": self.api_read_timeout_seconds,
+                "api_write_timeout_seconds": self.api_write_timeout_seconds,
+                "api_pool_timeout_seconds": self.api_pool_timeout_seconds,
+                "api_max_retries": self.api_max_retries,
+                "fail_fast": self.sdk_fail_fast,
                 "prompt": self.codex_prompt,
             },
         }
@@ -135,6 +178,58 @@ class AgentRunbookCOpenAISDK(AgentRunbookC):
             "max_turns": self.sdk_max_turns,
             "tool_timeout_seconds": self.tool_timeout_seconds,
             "max_tool_output_chars": self.max_tool_output_chars,
+            "responses_transport": self.responses_transport,
+            "api_connect_timeout_seconds": self.api_connect_timeout_seconds,
+            "api_read_timeout_seconds": self.api_read_timeout_seconds,
+            "api_write_timeout_seconds": self.api_write_timeout_seconds,
+            "api_pool_timeout_seconds": self.api_pool_timeout_seconds,
+            "api_max_retries": self.api_max_retries,
+            "fail_fast": self.sdk_fail_fast,
+        }
+
+    def _estimate_sdk_token_throughput(
+        self,
+        *,
+        duration_seconds: float,
+        tool_calls: list[dict[str, Any]],
+        usage: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not usage:
+            return None
+
+        output_tokens = int(usage.get("output_tokens", 0) or 0)
+        total_tokens = int(usage.get("total_tokens", 0) or 0)
+        reasoning_output_tokens = int(usage.get("reasoning_output_tokens", 0) or 0)
+        tool_duration_seconds = sum(
+            float(call.get("duration_seconds", 0.0) or 0.0) for call in tool_calls
+        )
+        estimated_model_wait_seconds = max(duration_seconds - tool_duration_seconds, 0.0)
+
+        def rate(tokens: int, seconds: float) -> float | None:
+            if tokens <= 0 or seconds <= 0.0:
+                return None
+            return tokens / seconds
+
+        return {
+            "model": self.sdk_model,
+            "basis": "Agents SDK aggregate usage tokens divided by attempt elapsed seconds",
+            "note": "Estimate only: the SDK exposes token usage but not per-response latency here.",
+            "output_tokens": output_tokens,
+            "reasoning_output_tokens": reasoning_output_tokens,
+            "total_tokens": total_tokens,
+            "elapsed_seconds": duration_seconds,
+            "tool_duration_seconds": tool_duration_seconds,
+            "estimated_model_wait_seconds": estimated_model_wait_seconds,
+            "output_tokens_per_second_wall": rate(output_tokens, duration_seconds),
+            "output_tokens_per_second_excluding_tool_time": rate(
+                output_tokens,
+                estimated_model_wait_seconds,
+            ),
+            "total_tokens_per_second_wall": rate(total_tokens, duration_seconds),
+            "total_tokens_per_second_excluding_tool_time": rate(
+                total_tokens,
+                estimated_model_wait_seconds,
+            ),
         }
 
     def _execute_prepared_attempt(
@@ -155,13 +250,18 @@ class AgentRunbookCOpenAISDK(AgentRunbookC):
         last_message_path.write_text(run_result.final_output, encoding="utf-8")
 
         duration_seconds = time.time() - started_at_ts
+        sdk_token_throughput_estimate = self._estimate_sdk_token_throughput(
+            duration_seconds=duration_seconds,
+            tool_calls=run_result.tool_calls,
+            usage=run_result.usage,
+        )
         stdout_path.write_text(
             json.dumps(
                 {
-                    "runner": "openai_agents_sdk",
-                    "model": self.sdk_model,
-                    "reasoning_effort": self.sdk_reasoning_effort,
+                    **self._runner_summary_fields(),
                     "final_output": run_result.final_output,
+                    "sdk_usage": run_result.usage,
+                    "sdk_token_throughput_estimate": sdk_token_throughput_estimate,
                     "tool_calls": run_result.tool_calls,
                 },
                 indent=2,
@@ -189,6 +289,8 @@ class AgentRunbookCOpenAISDK(AgentRunbookC):
                 "timed_out": run_result.timed_out,
                 "runner_error_detail": run_result.error_detail,
                 "tool_call_count": len(run_result.tool_calls),
+                "sdk_usage": run_result.usage,
+                "sdk_token_throughput_estimate": sdk_token_throughput_estimate,
             },
         }
 
