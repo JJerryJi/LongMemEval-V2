@@ -93,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--evaluator-reasoning-effort", choices=["low", "medium", "high"], default="medium")
     parser.add_argument("--evaluator-max-completion-tokens", type=int, default=4096)
 
-    parser.add_argument("--prompt-build-max-workers", type=int, default=1)
+    parser.add_argument("--prompt-build-max-workers", type=int, default=3)
     parser.add_argument("--shuffle-questions-seed", type=int, default=None)
     return parser.parse_args()
 

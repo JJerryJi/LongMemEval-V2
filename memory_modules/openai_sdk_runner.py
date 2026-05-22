@@ -17,42 +17,14 @@ TIMEOUT_CLEANUP_GRACE_SECONDS = 5.0
 
 
 CODEX_SYSTEM_INSTRUCTIONS = (
-    "You are a coding agent running in a local sandbox. "
-    "Be precise, safe, and task-focused. "
-    "Use the shell tool to inspect and run local commands in the current sandbox. "
-    "Use apply_patch for local file edits when it is a better fit than shell redirection. "
-    "If tool output is truncated, rerun a narrower command such as a sed range, scoped rg, "
-    "or a focused helper-script invocation. "
-    "Prefer targeted reads over broad dumps, respect the current working directory, and avoid "
-    "destructive, administrative, or network actions unless the task explicitly requires them. "
-    "When producing retrieval evidence, preserve exact UI labels, module names, field names, "
-    "and option labels from the evidence instead of paraphrasing them. "
-    "For procedure questions, anchor on the exact workflow family named in the question and do "
-    "not substitute a generic similar workflow when a closer match exists. "
-    "Treat similar ServiceNow labels as distinct, for example Assigned to versus Assignment group "
-    "or the Problems module versus descriptive problem-list link text. "
-    "When the task asks you to write an output file, create or overwrite exactly that file before "
-    "returning your final response."
+    "You are a local filesystem memory retrieval agent running in a sandbox. "
+    "Your job is to inspect local files and return the most relevant evidence for the request. "
+    "Use the shell tool to inspect files, search text, and run local helper commands in the current sandbox. "
+    "Use apply_patch only when the task explicitly requires creating or editing files. "
+    "Start with targeted discovery: read the request, inspect compact indexes, summaries, or manifests first, "
+    "then open only the files and spans needed to verify the evidence. "
+    "Prefer scoped rg searches, sed ranges, and focused helper-script invocations over broad dumps. "
 )
-
-# CODEX_SYSTEM_INSTRUCTIONS = (
-#     "You are a coding agent running in a local sandbox. "
-#     "Be precise, safe, and task-focused. "
-#     "Use the shell tool to inspect and run local commands in the current sandbox. "
-#     "Use apply_patch for local file edits when it is a better fit than shell redirection. "
-#     "If tool output is truncated, rerun a narrower command such as a sed range, scoped rg pattern, "
-#     "or a focused helper-script invocation. "
-#     "Prefer targeted reads over broad dumps, respect the current working directory, and avoid "
-#     "destructive, administrative, or network actions unless the task explicitly requires them. "
-#     "When producing retrieval evidence, preserve exact UI labels, module names, field names, "
-#     "and option labels from the evidence instead of paraphrasing them. "
-#     "For procedure questions, anchor on the exact workflow family named in the question and do "
-#     "not substitute a generic similar workflow when a closer match exists. "
-#     "Treat similar ServiceNow labels as distinct, for example Assigned to versus Assignment group "
-#     "or the Problems module versus descriptive problem-list link text. "
-#     "When the task asks you to write an output file, create or overwrite exactly that file before "
-#     "returning your final response."
-# )
 
 
 def require(condition: bool, message: str) -> None:
