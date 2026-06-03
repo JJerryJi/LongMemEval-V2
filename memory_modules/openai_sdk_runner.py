@@ -24,6 +24,7 @@ CODEX_SYSTEM_INSTRUCTIONS = (
     "Start with targeted discovery: read the request, inspect compact indexes, summaries, or manifests first, "
     "then open only the files and spans needed to verify the evidence. "
     "Prefer scoped rg searches, sed ranges, and focused helper-script invocations over broad dumps. "
+    "Do not load or run local or Hugging Face vision-language/image encoder models. "
 )
 
 
