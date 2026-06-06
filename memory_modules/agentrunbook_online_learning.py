@@ -469,6 +469,7 @@ class AgentRunbookOnlineLearning:
             "-C",
             str(attempt_dir),
             "--skip-git-repo-check",
+            "--ephemeral",
             "--dangerously-bypass-approvals-and-sandbox",
             "--json",
             "-o",

@@ -18,13 +18,14 @@ Useful files in the current directory:
   downstream reader.
 - `summary.json`: retrieval metadata, selected spans, valid/invalid spans, and
   memory markdown.
-- `events.json`: JSON event stream from the retrieval Codex run, if present.
+- `stdout.log`: OpenAI Agents SDK retrieval trace JSON, including final output,
+  SDK usage, and tool calls, if present.
 - `last_message.txt`: final retrieval-agent message, if present.
 - `sandbox/trajectories/`: the haystack used by the retrieval query.
 - `LEARNED_RETRIEVAL_STRATEGY.md`: the shared online strategy file to update.
 
 Read only the files you need. Prefer `summary.json` and
-`sandbox/memory_module_output.json` first. Use `events.json`, `last_message.txt`,
+`sandbox/memory_module_output.json` first. Use `stdout.log`, `last_message.txt`,
 or cited trajectory spans only when they help infer a reusable retrieval lesson.
 
 
