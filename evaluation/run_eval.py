@@ -29,6 +29,13 @@ METHODS = {
 }
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def parse_question_ids(raw_values: list[str] | None) -> list[str] | None:
     if not raw_values:
         return None
@@ -74,7 +81,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embedding-base-url", default=os.getenv("LME_EMBEDDING_BASE_URL", "http://localhost:8114/v1"))
     parser.add_argument("--embedding-api-key-env", default="OPENAI_API_KEY")
 
-    parser.add_argument("--codex-binary", default=os.getenv("CODEX_BINARY", "codex"))
+    parser.add_argument("--codex-binary", default=os.getenv("CODEX_BINARY", "/home/diwu/software/codex-latest-binary"))
     parser.add_argument("--codex-model", default=os.getenv("CODEX_MODEL", "gpt-5.4-mini"))
     parser.add_argument("--codex-reasoning-effort", default=os.getenv("CODEX_REASONING_EFFORT", "xhigh"))
     parser.add_argument("--codex-timeout-seconds", type=float, default=float(os.getenv("CODEX_TIMEOUT_SECONDS", "1800")))
@@ -87,6 +94,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--openai-sdk-max-turns", type=int, default=int(os.getenv("OPENAI_SDK_MAX_TURNS", "30")))
     parser.add_argument("--openai-sdk-tool-timeout-seconds", type=float, default=float(os.getenv("OPENAI_SDK_TOOL_TIMEOUT_SECONDS", "30")))
     parser.add_argument("--openai-sdk-max-tool-output-chars", type=int, default=int(os.getenv("OPENAI_SDK_MAX_TOOL_OUTPUT_CHARS", "1048576")))
+    parser.add_argument(
+        "--openai-sdk-online-learning",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("OPENAI_SDK_ONLINE_LEARNING", False),
+        help="Enable V6-style online learned retrieval strategy for agentrunbook_c_openai_sdk.",
+    )
 
     parser.add_argument("--evaluator-model", default=os.getenv("EVALUATOR_MODEL", "gpt-5.2"))
     parser.add_argument("--evaluator-api-key-env", default=os.getenv("EVALUATOR_API_KEY_ENV", "OPENAI_API_KEY"))
@@ -199,14 +212,26 @@ def build_memory_config(args: argparse.Namespace, data_root: Path) -> dict[str, 
             },
         }
     if args.method == "agentrunbook_c_openai_sdk":
+        memory_params: dict[str, object] = {
+            "questions_path": str((data_root / "questions.jsonl").resolve()),
+            "evidence_mode": "both",
+            "trajectory_pool_root": None,
+            "query_openai_sdk_params": openai_sdk_query_params(args),
+        }
+        if args.openai_sdk_online_learning:
+            memory_params["online_learning_params"] = {
+                "enabled": True,
+                "binary": args.codex_binary,
+                "model": args.codex_model,
+                "reasoning_effort": args.openai_sdk_reasoning_effort,
+                "timeout_seconds": args.codex_timeout_seconds,
+                "extra_config": [],
+                "extra_args": [],
+                "strategy_memory_dir": None,
+            }
         return {
             "memory_type": "agentrunbook_c_openai_sdk",
-            "memory_params": {
-                "questions_path": str((data_root / "questions.jsonl").resolve()),
-                "evidence_mode": "both",
-                "trajectory_pool_root": None,
-                "query_openai_sdk_params": openai_sdk_query_params(args),
-            },
+            "memory_params": memory_params,
         }
     return {
         "memory_type": "agentrunbook_c",
@@ -221,6 +246,10 @@ def build_memory_config(args: argparse.Namespace, data_root: Path) -> dict[str, 
 
 def main() -> None:
     args = parse_args()
+    if args.openai_sdk_online_learning and args.method != "agentrunbook_c_openai_sdk":
+        raise SystemExit("--openai-sdk-online-learning is only supported with --method agentrunbook_c_openai_sdk")
+    if args.openai_sdk_online_learning and args.prompt_build_max_workers != 1:
+        raise SystemExit("--openai-sdk-online-learning requires --prompt-build-max-workers 1 for sequential online learning")
     data_root = Path(args.data_root).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     runtime_dir = output_dir / "runtime_inputs"

@@ -151,7 +151,7 @@ class AgentRunbookOnlineLearningConfig:
     enabled: bool
     binary: str = "codex"
     model: str = "gpt-5.4-mini"
-    reasoning_effort: str = "xhigh"
+    reasoning_effort: str = "medium"
     timeout_seconds: float = 1800.0
     extra_config: list[str] = field(default_factory=list)
     extra_args: list[str] = field(default_factory=list)
@@ -185,7 +185,7 @@ class AgentRunbookOnlineLearningConfig:
             binary=_ensure_string(params.get("binary", "codex"), field_name="online_learning_params.binary"),
             model=_ensure_string(params.get("model", "gpt-5.4-mini"), field_name="online_learning_params.model"),
             reasoning_effort=_ensure_string(
-                params.get("reasoning_effort", "xhigh"),
+                params.get("reasoning_effort", "medium"),
                 field_name="online_learning_params.reasoning_effort",
             ),
             timeout_seconds=_ensure_positive_float(
