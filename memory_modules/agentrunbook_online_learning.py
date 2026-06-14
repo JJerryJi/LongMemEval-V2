@@ -95,9 +95,29 @@ QUERY_INSTRUCTION_APPENDIX = """
 Before broad trajectory exploration, briefly read `LEARNED_RETRIEVAL_STRATEGY.md` if it exists. It is an online strategy file learned from previous queries in this run.
 
 - First check `Past Queries`. If part of the prior retrieved spans appears reusable, consider reusing it directly and avoid broad search.
+- Treat learned notes as leads, not answers. Verify exact page type, actor/view, section boundary, field name, and pre-action versus post-action state before reusing a note.
 - Use `Strategies` as retrieval shortcuts and exactness gotchas.
 - If a learned note conflicts with current evidence, current evidence wins.
+- If a learned note only points to a nearby workflow, keep searching or report uncertainty; do not convert the nearby workflow into a positive answer.
 - Do not edit `LEARNED_RETRIEVAL_STRATEGY.md`.
+
+## Online-Learning Evidence Gate
+
+Before writing the output, classify the evidence for the exact requested target:
+- `directly_supported`: the cited state directly shows the requested field, control, section, workflow step, page type, or answer.
+- `contradicts_premise`: the cited state directly shows the named field/control/workflow/page does not exist or the prompt's wording is wrong.
+- `insufficient`: only nearby or partial evidence was found.
+- `near_match_only`: the evidence is from a similar but different page, actor/view, field, time, or workflow.
+
+Only provide a positive answer hint for `directly_supported` evidence. For `contradicts_premise`, lead with the contradiction and tell the downstream reader to abstain from the prompt's premise. For `insufficient` or `near_match_only`, preserve uncertainty instead of converting the nearest workflow into an answer.
+
+Check exact scope before reusing evidence: page type, actor/view, section boundary, field name, pre-action versus post-action state, and whether the question asks for a control inside a named section versus a nearby control outside that section.
+
+Do not answer with a nearby valid workflow when the question asks for a nonexistent label, missing tab, missing direct link, missing textbox, missing upload control, missing price filter, or missing dedicated module. In these cases, the useful memory is the negative evidence.
+If a field value appears only after a user action in the span, do not describe it as prepopulated. Separate initial state from post-action state.
+If a link/control is outside the section named in the question, do not present it as if it were inside that section. For example, a link in a separate sidebar block is not a direct link in `Toolbox`.
+
+The downstream reader depends on your framing. If the evidence is negative or only a near match, make that the first sentence of `## Support Analysis`.
 """
 
 
