@@ -175,6 +175,7 @@ def make_sandbox_tools(
     tool_calls: list[dict[str, Any]],
     tool_timeout_seconds: float,
     max_tool_output_chars: int,
+    allowed_apply_patch_paths: set[Path] | None = None,
 ) -> list[Any]:
     return [
         ShellTool(
@@ -188,7 +189,11 @@ def make_sandbox_tools(
             needs_approval=False,
         ),
         ApplyPatchTool(
-            editor=WorkspaceEditor(sandbox_dir=sandbox_dir, tool_calls=tool_calls),
+            editor=WorkspaceEditor(
+                sandbox_dir=sandbox_dir,
+                tool_calls=tool_calls,
+                allowed_external_paths=allowed_apply_patch_paths,
+            ),
             needs_approval=False,
         ),
     ]
@@ -448,16 +453,32 @@ class ShellExecutor:
 class WorkspaceEditor:
     """Applies apply_patch operations inside the prepared benchmark sandbox."""
 
-    def __init__(self, *, sandbox_dir: Path, tool_calls: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        *,
+        sandbox_dir: Path,
+        tool_calls: list[dict[str, Any]],
+        allowed_external_paths: set[Path] | None = None,
+    ) -> None:
         self._root = sandbox_dir.resolve()
+        self._allowed_external_paths = {
+            path.expanduser().resolve()
+            for path in (allowed_external_paths or set())
+        }
         self.tool_calls = tool_calls
 
     def create_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
         started = time.time()
+        target: Path | None = None
         try:
             if operation.diff is None:
                 raise RuntimeError(f"missing diff for create_file: {operation.path}")
             target = self._resolve(operation.path, ensure_parent=True)
+            if not self._is_within_root(target):
+                raise RuntimeError(
+                    "apply_patch create_file is not allowed for external paths: "
+                    f"{operation.path}"
+                )
             content = apply_diff("", operation.diff, mode="create")
             target.write_text(content, encoding="utf-8")
             return self._result(
@@ -465,47 +486,68 @@ class WorkspaceEditor:
                 started,
                 "completed",
                 f"Created {self._relative(target)}",
+                resolved_path=target,
             )
         except Exception as exc:
-            self._record(operation, started, "failed", str(exc))
+            self._record(operation, started, "failed", str(exc), resolved_path=target)
             raise
 
     def update_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
         started = time.time()
+        target: Path | None = None
+        destination: Path | None = None
         try:
             if operation.diff is None:
                 raise RuntimeError(f"missing diff for update_file: {operation.path}")
             target = self._resolve(operation.path)
             updated = apply_diff(target.read_text(encoding="utf-8"), operation.diff)
             destination = self._resolve(operation.move_to) if operation.move_to else target
+            if operation.move_to and (
+                target in self._allowed_external_paths
+                or destination in self._allowed_external_paths
+            ):
+                raise RuntimeError("apply_patch move_to is not allowed for external paths")
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_text(updated, encoding="utf-8")
             if destination != target:
                 target.unlink()
                 output = (
-                    f"Updated {self._relative(target)}\n"
-                    f"Moved {self._relative(target)} to {self._relative(destination)}"
+                    f"Updated {self._display_path(target)}\n"
+                    f"Moved {self._display_path(target)} to {self._display_path(destination)}"
                 )
             else:
-                output = f"Updated {self._relative(target)}"
-            return self._result(operation, started, "completed", output)
+                output = f"Updated {self._display_path(target)}"
+            return self._result(
+                operation,
+                started,
+                "completed",
+                output,
+                resolved_path=target,
+            )
         except Exception as exc:
-            self._record(operation, started, "failed", str(exc))
+            self._record(operation, started, "failed", str(exc), resolved_path=target)
             raise
 
     def delete_file(self, operation: ApplyPatchOperation) -> ApplyPatchResult:
         started = time.time()
+        target: Path | None = None
         try:
             target = self._resolve(operation.path)
+            if not self._is_within_root(target):
+                raise RuntimeError(
+                    "apply_patch delete_file is not allowed for external paths: "
+                    f"{operation.path}"
+                )
             target.unlink(missing_ok=True)
             return self._result(
                 operation,
                 started,
                 "completed",
                 f"Deleted {self._relative(target)}",
+                resolved_path=target,
             )
         except Exception as exc:
-            self._record(operation, started, "failed", str(exc))
+            self._record(operation, started, "failed", str(exc), resolved_path=target)
             raise
 
     def _resolve(self, value: str, ensure_parent: bool = False) -> Path:
@@ -514,14 +556,22 @@ class WorkspaceEditor:
         candidate = Path(value)
         target = candidate if candidate.is_absolute() else self._root / candidate
         target = target.resolve()
-        if os.path.commonpath([str(self._root), str(target)]) != str(self._root):
+        if not self._is_within_root(target) and target not in self._allowed_external_paths:
             raise RuntimeError(f"apply_patch path escapes sandbox: {value}")
         if ensure_parent:
             target.parent.mkdir(parents=True, exist_ok=True)
         return target
 
+    def _is_within_root(self, path: Path) -> bool:
+        return os.path.commonpath([str(self._root), str(path)]) == str(self._root)
+
     def _relative(self, path: Path) -> str:
         return path.relative_to(self._root).as_posix()
+
+    def _display_path(self, path: Path) -> str:
+        if self._is_within_root(path):
+            return self._relative(path)
+        return str(path)
 
     def _result(
         self,
@@ -529,8 +579,10 @@ class WorkspaceEditor:
         started: float,
         status: str,
         output: str,
+        *,
+        resolved_path: Path | None,
     ) -> ApplyPatchResult:
-        self._record(operation, started, status, output)
+        self._record(operation, started, status, output, resolved_path=resolved_path)
         return ApplyPatchResult(status=status, output=output)
 
     def _record(
@@ -539,12 +591,15 @@ class WorkspaceEditor:
         started: float,
         status: str,
         output: str,
+        *,
+        resolved_path: Path | None,
     ) -> None:
         self.tool_calls.append(
             {
                 "tool": "apply_patch",
                 "operation": operation.type,
                 "path": operation.path,
+                "resolved_path": str(resolved_path) if resolved_path is not None else None,
                 "move_to": operation.move_to,
                 "duration_seconds": time.time() - started,
                 "tool_response": {"status": status, "output": output},
@@ -621,13 +676,17 @@ class OpenAISDKRunner:
         *,
         sandbox_dir: Path,
         user_prompt: str,
+        system_instructions: str = CODEX_SYSTEM_INSTRUCTIONS,
+        allowed_apply_patch_paths: set[Path] | None = None,
     ) -> OpenAISDKRunResult:
         tool_calls: list[dict[str, Any]] = []
         try:
             result = self._run_agent(
                 sandbox_dir=sandbox_dir,
                 user_prompt=user_prompt,
+                system_instructions=system_instructions,
                 tool_calls=tool_calls,
+                allowed_apply_patch_paths=allowed_apply_patch_paths,
             )
             return OpenAISDKRunResult(
                 final_output=str(getattr(result, "final_output", "")),
@@ -661,7 +720,9 @@ class OpenAISDKRunner:
         *,
         sandbox_dir: Path,
         user_prompt: str,
+        system_instructions: str,
         tool_calls: list[dict[str, Any]],
+        allowed_apply_patch_paths: set[Path] | None,
     ) -> Any:
         sdk = load_agents_sdk()
         Agent = sdk["Agent"]
@@ -674,7 +735,7 @@ class OpenAISDKRunner:
 
         agent = Agent(
             name=self.config.agent_name,
-            instructions=CODEX_SYSTEM_INSTRUCTIONS,
+            instructions=ensure_string(system_instructions, field_name="system_instructions"),
             model=self.config.model,
             model_settings=ModelSettings(
                 reasoning=Reasoning(effort=self.config.reasoning_effort),
@@ -685,6 +746,7 @@ class OpenAISDKRunner:
                 tool_calls=tool_calls,
                 tool_timeout_seconds=self.config.tool_timeout_seconds,
                 max_tool_output_chars=self.config.max_tool_output_chars,
+                allowed_apply_patch_paths=allowed_apply_patch_paths,
             ),
         )
         agent_input = build_agent_input(
