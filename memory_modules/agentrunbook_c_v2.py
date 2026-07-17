@@ -17,6 +17,8 @@ from .codex import (
 from .memory import MemoryConfig, register_memory, require
 from .agentrunbook_online_learning import (
     AgentRunbookOnlineLearning,
+    AgentRunbookOnlineLearningCodexConfig,
+    AgentRunbookOnlineLearningCodexRunner,
     AgentRunbookOnlineLearningConfig,
     QUERY_INSTRUCTION_APPENDIX,
 )
@@ -71,7 +73,7 @@ class AgentRunbookCV2(AgentRunbookC):
             "timeout_seconds": timeout_seconds,
             "max_retries": max_attempts,
             "prompt": sdk_params.get("prompt", memory_params.get("prompt", "")) or None,
-            "require_evidence_gate": online_learning_config.enabled,
+            "require_evidence_gate": False,
             "extra_config": [],
             "extra_args": [],
         }
@@ -146,6 +148,18 @@ class AgentRunbookCV2(AgentRunbookC):
         self.api_max_retries = ensure_non_negative_int(
             sdk_params.get("api_max_retries", 0),
             field_name="query_openai_sdk_params.api_max_retries",
+        )
+        self.consolidation_codex_runner = (
+            AgentRunbookOnlineLearningCodexRunner(
+                AgentRunbookOnlineLearningCodexConfig(
+                    binary=self.online_learning.config.consolidation_codex_binary,
+                    model=self.sdk_model,
+                    reasoning_effort=self.sdk_reasoning_effort,
+                    timeout_seconds=self.online_learning.config.timeout_seconds,
+                )
+            )
+            if self.online_learning.enabled
+            else None
         )
         self.sdk_runner = OaiAgentsSDKRunner(
             OaiAgentsSDKRunnerConfig(
@@ -599,12 +613,16 @@ class AgentRunbookCV2(AgentRunbookC):
                 ),
             }
 
+        require(
+            self.consolidation_codex_runner is not None,
+            "online-learning consolidation runner is not configured",
+        )
         return self.online_learning.run_consolidation(
             question_id=question_id,
             attempt_dir=attempt_dir,
             query_trace_dir=self.query_trace_dir,
             workspace_dir=self.workspace_dir,
-            runner=self.sdk_runner,
+            consolidation_runner=self.consolidation_codex_runner,
             is_cancelled=self._is_cancelled,
         )
 

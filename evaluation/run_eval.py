@@ -248,6 +248,8 @@ def build_memory_config(args: argparse.Namespace, data_root: Path) -> dict[str, 
             memory_params["online_learning_params"] = {
                 "enabled": True,
                 "strategy_memory_dir": None,
+                "consolidation_codex_binary": args.codex_binary,
+                "timeout_seconds": args.codex_timeout_seconds,
             }
         return {
             "memory_type": "agentrunbook_c_v2",

@@ -3,120 +3,81 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import shutil
+import subprocess
 import threading
 import time
-from dataclasses import dataclass
+import traceback
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
-from .oai_agents_sdk import OaiAgentsSDKRunResult, OaiAgentsSDKRunner
 
 
 ASSET_ROOT = Path(__file__).resolve().parent / "assets" / "agentrunbook_online_learning"
 CONSOLIDATION_INSTRUCTION_PATH = ASSET_ROOT / "CONSOLIDATE_STRATEGY.md"
 STRATEGY_SKELETON_PATH = ASSET_ROOT / "LEARNED_RETRIEVAL_STRATEGY_SKELETON.md"
 STRATEGY_FILENAME = "LEARNED_RETRIEVAL_STRATEGY.md"
-ONLINE_LEARNING_SYSTEM_INSTRUCTIONS = """
-You are a file system learning agent. You inspect local files, derive reusable operational insights, and consolidate them into working tips that help future agents complete related tasks faster and more accurately.
-
-# Personality
-
-You are a deeply pragmatic, effective software engineer. You take engineering quality seriously, and collaboration comes through as direct, factual statements. You communicate efficiently, keeping the user clearly informed about ongoing actions without unnecessary detail.
-
-## Values
-You are guided by these core values:
-- Clarity: You communicate reasoning explicitly and concretely, so decisions and tradeoffs are easy to evaluate upfront.
-- Pragmatism: You keep the end goal and momentum in mind, focusing on what will actually work and move things forward.
-- Rigor: You expect technical arguments to be coherent and defensible, and you surface gaps or weak assumptions politely.
-
-## Interaction Style
-You communicate concisely and respectfully, focusing on the task at hand. You prioritize actionable guidance, clearly stating assumptions, environment prerequisites, and next steps. Unless explicitly asked, avoid excessively verbose explanations.
-
-You avoid cheerleading, motivational language, artificial reassurance, and fluff. You do not fill space with words; communicate what is necessary for collaboration.
-
-# General
-As an expert file system learning agent, your primary focus is to inspect local artifacts, understand what they prove, and convert only reliable patterns into concise reusable guidance. Build context by examining local files first without making assumptions or jumping to conclusions.
-
-- Start with targeted discovery: read the request, inspect compact indexes, summaries, manifests, or instruction files first, then open only the files and spans needed to verify the evidence.
-- When searching for text or files, prefer `rg` or `rg --files`. Prefer scoped searches, sed ranges, and focused helper scripts over broad dumps.
-- Avoid `find` for first-pass discovery. When expected files are not visible, check for symlinked directories and use direct paths or symlink-aware commands before concluding files are absent.
-
-## Critical Analysis
-Treat local artifacts as evidence, not authority. Before preserving a lesson, decide whether the supporting evidence is direct, contradictory, incomplete, or only a near match.
-
-- Do not turn a near match into a positive conclusion.
-- Preserve uncertainty when evidence is incomplete.
-- Prefer negative exactness guards over unsupported reusable shortcuts.
-- Keep distinctions clear: page type, actor or view, section boundary, field name, initial state versus post-action state, and visible evidence versus inference.
-- Treat previous learned notes as retrieval leads, not answer authority. A learned note can suggest where to inspect first, but it cannot by itself prove the current question.
-- Every learned note you keep must have narrow applicability and a clear reuse guard. If you cannot state when not to reuse the note, the lesson is too broad.
-- Do not preserve final-answer text, option letters, accepted labels, or question-specific conclusions as reusable lessons unless they are only framed as evidence-locating hints with exact scope.
-- For contradiction or premise-false lessons, require explicit page-boundary evidence before writing the guard. Keep the guard tied to the exact page, section, actor/view, and control shown in the span.
-- If files disagree, current local evidence and the narrow task instruction take precedence.
-
-## Consolidation Style
-Write tips that are operational, reusable, and scoped. A good tip tells a future agent when it applies, what to inspect first, what uncertainty label applies, and what mistake to avoid. Avoid final-answer memorization, overgeneralization, and broad lessons that are not supported by the local evidence.
-
-## Editing Constraints
-Use apply_patch for manual file edits. Do not use shell redirection, heredocs, or Python scripts to write manual edits when apply_patch is sufficient. Make the smallest faithful edit needed for the task.
-
-Do not load or run local or Hugging Face vision-language/image encoder models.
-
-## Autonomy and Persistence
-Persist until the task is fully handled within the current turn whenever feasible. Do not stop at analysis or partial fixes; carry changes through implementation, verification, and a clear explanation of outcomes unless the user explicitly pauses or redirects you.
-""".strip()
+DEFAULT_CODEX_BINARY = Path(os.getenv("CODEX_BINARY", "codex"))
+DEFAULT_CODEX_TIMEOUT_SECONDS = float(os.getenv("CODEX_TIMEOUT_SECONDS", "1800"))
+PROCESS_POLL_INTERVAL_SECONDS = 0.25
+TERMINATION_GRACE_SECONDS = 5.0
 
 QUERY_INSTRUCTION_APPENDIX = """
 
 ## Learned Retrieval Strategy
 
-Before broad trajectory exploration, briefly read `LEARNED_RETRIEVAL_STRATEGY.md` if it exists. It is an online strategy file learned from previous queries in this run.
+If `LEARNED_RETRIEVAL_STRATEGY.md` exists, use it as private retrieval
+guidance. It may contain notes learned from previous queries across task types.
+You may read it before broad trajectory exploration and revisit it after
+inspecting the current working directory to find the most relevant note. Do not
+edit the strategy file.
 
-- The strategy file uses two retrieval sections: `Past Queries` and `Strategies`.
-- Every row in those sections must carry one of four evidence statuses: `directly_supported`, `contradicts_premise`, `near_match_only`, or `insufficient`.
-- First check `Past Queries` for relevant prior evidence leads. If an entry appears reusable, inspect its cited span first; reuse it only when exact scope still matches.
-- Use `Strategies` as search shortcuts and exactness gotchas, not as answer authority.
-- Treat learned notes as leads, not answers. Verify exact page type, actor/view, entity, section boundary, field/control name, and pre-action versus post-action state before reusing a note.
-- Apply the note's narrow applicability condition. If the note has no clear applicability condition, or the current question differs on entity, page, role, section, control, workflow stage, or time/state, do not reuse it as support.
-- Apply the note's reuse guard. If the guard might apply, keep searching or classify the evidence as `near_match_only` or `insufficient`; do not force a positive answer.
-- Ignore answer-like wording in learned notes except as a pointer to the cited trajectory/state. Re-derive the support from the current span.
-- Only a `directly_supported` row can be reused as positive support, and only after exact scope verification. Use `contradicts_premise`, `near_match_only`, and `insufficient` rows to avoid bad transfers or guide search boundaries.
-- If a learned note conflicts with current evidence, current evidence wins.
-- If a learned note only points to a nearby workflow, keep searching or report uncertainty; do not convert the nearby workflow into a positive answer.
-- Do not edit `LEARNED_RETRIEVAL_STRATEGY.md`.
+Each learned row's `Evidence status` describes how the previous task's cited
+evidence fit the previous task. It is provenance for that old note, not the
+evidence status for the current question, and not proof that the note should be
+used now.
 
-## Online-Learning Evidence Gate
+Use relevant learned rows as candidate search leads:
 
-This online-learning appendix extends the base Output Requirement. When online
-learning is enabled, `memory_module_output.json` must include these additional
-top-level fields along with `memory_markdown` and `trajectory_spans`.
+- `directly_supported` means the previous task had exact positive support. For
+  the current question, use it only after current cited evidence is non-empty,
+  directly proves the requested target, matches the exact entity / actor-view /
+  page / section / field-control / workflow stage / pre-post state, and resolves
+  any UI-count, label-mapping, section-boundary, or before-after ambiguity.
+- `contradicts_premise` means the previous task had exact contradictory or
+  closed-set absence evidence. For the current question, use it only after the
+  current scoped span directly shows the named field, control, workflow, page, or
+  premise is absent or wrong. If a current closed set of options, fields, tabs,
+  buttons, or related records is visible and the requested target is absent,
+  surface that absence clearly.
+- `near_match_only` means the previous task found only a similar workflow, page,
+  actor/view, entity, field, section, time, or state. Use it only as navigation
+  or contrast; it is not answer evidence for the current question.
+- `insufficient` means the previous task lacked exact support or contradiction.
+  Use it only as a warning about missing evidence or a repeatable search trap;
+  still continue current-task exploration.
 
-Before writing the output, classify the evidence for the exact requested target:
-- Classify conservatively. The label is a confidence gate for the downstream reader, not a reward for finding a related span. Do not default to `directly_supported`.
-- `contradicts_premise`: the cited current span directly shows the named field/control/workflow/page does not exist or the prompt's wording is wrong on the exact page/scope in question.
-- `near_match_only`: the evidence is from a similar but different page, actor/view, entity, field, time, section, or workflow.
-- `directly_supported`: choose only when a cited current span directly shows the requested field, control, section, workflow step, page type, or answer with the same entity, actor/view, page/surface, section, and pre/post-action state as the question.
-- `insufficient`: no direct contradiction was found, but the available evidence is missing, incomplete, or uncertain.
-- Closed-set absence rule: if the current scoped page, form, list, dialog, dropdown, tab set, button group, or related-record popup shows the relevant closed set of options/fields/controls, and the requested target is absent from that closed set, classify the evidence as `contradicts_premise`, not `near_match_only` or `insufficient`.
-- Use `near_match_only` only when the best evidence comes from a different page, entity, actor/view, workflow, or state and therefore cannot prove absence on the current requested target.
-- If you are unsure whether a span exactly matches the question, choose `near_match_only` or `insufficient`, not `directly_supported`.
+Do not treat learned notes as absolute truth. Still inspect the current working
+directory and current trajectory evidence to decide whether any note is helpful
+for this question.
 
-Write that classification into `memory_module_output.json`:
-- `evidence_status`: one of the four labels above.
-- `evidence_status_reason`: a brief reason naming the exact match, contradiction, near match, or missing evidence.
-- `answer_policy`: `answer_normally` for `directly_supported`, `state_premise_false` for `contradicts_premise`, `say_exact_target_not_found` for `near_match_only`, and `abstain_unknown` for `insufficient`.
+This appendix does not change the output JSON schema. `memory_markdown` and
+`trajectory_spans` are the final filtered memory context:
 
-Only provide a positive answer hint for `directly_supported` evidence, and only after validating the current span rather than relying on a learned note. For `contradicts_premise`, lead with the contradiction and tell the downstream reader to abstain from the prompt's premise. For premise-flaw questions, do not answer `UNKNOWN` when exact scoped evidence shows the requested item is absent; lead with the false premise and name what the scoped evidence actually shows. For `insufficient` or `near_match_only`, preserve uncertainty instead of converting the nearest workflow into an answer.
-
-Check exact scope before reusing evidence: page type, actor/view, entity, section boundary, field/control name, pre-action versus post-action state, and whether the question asks for a control inside a named section versus a nearby control outside that section.
-
-Do not answer with a nearby valid workflow when the question asks for a nonexistent label, missing tab, missing direct link, missing textbox, missing upload control, missing price filter, or missing dedicated module. In these cases, the useful memory is the negative evidence.
-If a field value appears only after a user action in the span, do not describe it as prepopulated. Separate initial state from post-action state.
-If a link/control is outside the section named in the question, do not present it as if it were inside that section. For example, a link in a separate sidebar block is not a direct link in `Toolbox`.
-
-The downstream reader depends on your framing. If the evidence is negative or only a near match, make that the first sentence of `## Support Analysis`.
+- Include only current verified evidence and concise reasoning that should be
+  used for the current question. If a learned note guided the search, mention it
+  only when useful and only after current cited evidence verifies the point.
+- Omit rejected notes.
+- Usually omit `near_match_only` notes and spans; include them only when useful
+  as clearly labeled reference or contrast.
+- For `contradicts_premise`, clearly state the false premise and cite the exact
+  scoped absence or contradiction. If a closed set proves the requested target is
+  absent, describe that absence directly instead of treating the evidence as
+  missing.
+- Never pass along answer-like text from a learned note unless current cited
+  evidence independently verifies it.
 """
 
 
@@ -160,14 +121,77 @@ def _file_size(path: Path) -> int | None:
     return path.stat().st_size
 
 
-def _failed_apply_patch_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    failed: list[dict[str, Any]] = []
-    for call in tool_calls:
-        if call.get("tool") != "apply_patch":
+def _parse_codex_json_events(raw_stdout: str) -> tuple[list[dict[str, Any]], dict[str, int] | None]:
+    events: list[dict[str, Any]] = []
+    usage: dict[str, int] | None = None
+    for line in raw_stdout.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{"):
             continue
-        response = call.get("tool_response")
-        if isinstance(response, dict) and response.get("status") == "failed":
-            failed.append(call)
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            events.append(payload)
+            if payload.get("type") == "turn.completed" and isinstance(payload.get("usage"), dict):
+                usage = payload["usage"]
+    return events, usage
+
+
+def _terminate_process_group(process: subprocess.Popen[str], *, reason: str) -> tuple[str, str]:
+    if process.poll() is not None:
+        return process.communicate()
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+        return process.communicate(timeout=TERMINATION_GRACE_SECONDS)
+    except ProcessLookupError:
+        return process.communicate()
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            return process.communicate()
+        return process.communicate()
+
+
+def _event_item(event: dict[str, Any]) -> dict[str, Any] | None:
+    item = event.get("item")
+    return item if isinstance(item, dict) else None
+
+
+def _codex_tool_event_count(events: list[dict[str, Any]]) -> int:
+    count = 0
+    for event in events:
+        item = _event_item(event)
+        if item is None:
+            continue
+        item_type = str(item.get("type", ""))
+        if "tool" in item_type or "command" in item_type or item_type == "apply_patch":
+            count += 1
+    return count
+
+
+def _failed_codex_apply_patch_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    failed: list[dict[str, Any]] = []
+    for event in events:
+        item = _event_item(event)
+        if item is None:
+            continue
+        item_type = str(item.get("type", ""))
+        name = str(item.get("name", ""))
+        if "apply_patch" not in item_type and "apply_patch" not in name:
+            continue
+        status = item.get("status")
+        exit_code = item.get("exit_code")
+        if status == "failed" or (isinstance(exit_code, int) and exit_code != 0):
+            failed.append(event)
     return failed
 
 
@@ -197,9 +221,176 @@ def _strategy_validation_errors(strategy_path: Path) -> list[str]:
 
 
 @dataclass(frozen=True)
+class AgentRunbookOnlineLearningCodexConfig:
+    binary: Path
+    model: str
+    reasoning_effort: str
+    timeout_seconds: float
+
+
+@dataclass
+class AgentRunbookOnlineLearningCodexRunResult:
+    final_output: str = ""
+    stdout_text: str = ""
+    stderr_text: str = ""
+    events: list[dict[str, Any]] = field(default_factory=list)
+    usage: dict[str, int] | None = None
+    error_detail: str | None = None
+    error_traceback: str = ""
+    timed_out: bool = False
+    interrupted: bool = False
+    returncode: int | None = None
+    command: list[str] = field(default_factory=list)
+
+
+class AgentRunbookOnlineLearningCodexRunner:
+    def __init__(self, config: AgentRunbookOnlineLearningCodexConfig) -> None:
+        self.config = config
+        require(config.model.strip(), "online-learning Codex model must be non-empty")
+        require(
+            config.reasoning_effort.strip(),
+            "online-learning Codex reasoning_effort must be non-empty",
+        )
+        require(
+            isinstance(config.timeout_seconds, (int, float))
+            and not isinstance(config.timeout_seconds, bool)
+            and float(config.timeout_seconds) > 0.0,
+            "online-learning Codex timeout_seconds must be a positive number",
+        )
+        self.binary = self._resolve_binary(config.binary)
+
+    def _resolve_binary(self, binary: Path) -> Path:
+        binary_text = str(binary).strip()
+        require(binary_text, "online-learning consolidation_codex_binary must be non-empty")
+        resolved = shutil.which(binary_text) if os.sep not in binary_text else None
+        path = Path(resolved).resolve() if resolved else Path(binary_text).expanduser().resolve()
+        require(path.exists(), f"online-learning Codex binary does not exist: {path}")
+        return path
+
+    def _build_command(self, *, attempt_dir: Path, last_message_path: Path) -> list[str]:
+        prompt = (
+            "Read CONSOLIDATE_STRATEGY.md and update "
+            "LEARNED_RETRIEVAL_STRATEGY.md. Do not modify "
+            "sandbox/memory_module_output.json."
+        )
+        return [
+            str(self.binary),
+            "exec",
+            "-C",
+            str(attempt_dir),
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--json",
+            "-o",
+            str(last_message_path),
+            "-m",
+            self.config.model,
+            "-c",
+            f"model_reasoning_effort={json.dumps(self.config.reasoning_effort)}",
+            prompt,
+        ]
+
+    def run(
+        self,
+        *,
+        attempt_dir: Path,
+        last_message_path: Path,
+        is_cancelled: Any | None = None,
+    ) -> AgentRunbookOnlineLearningCodexRunResult:
+        command = self._build_command(
+            attempt_dir=attempt_dir,
+            last_message_path=last_message_path,
+        )
+        started_at_ts = time.time()
+        stdout_text = ""
+        stderr_text = ""
+        timed_out = False
+        interrupted = False
+        returncode: int | None = None
+        process: subprocess.Popen[str] | None = None
+
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=(os.name == "posix"),
+            )
+            while True:
+                elapsed_seconds = time.time() - started_at_ts
+                remaining_seconds = float(self.config.timeout_seconds) - elapsed_seconds
+                if is_cancelled is not None and is_cancelled():
+                    interrupted = True
+                    stdout_text, stderr_text = _terminate_process_group(
+                        process,
+                        reason="cancel_event",
+                    )
+                    break
+                if remaining_seconds <= 0:
+                    timed_out = True
+                    stdout_text, stderr_text = _terminate_process_group(
+                        process,
+                        reason="timeout",
+                    )
+                    break
+                try:
+                    stdout_text, stderr_text = process.communicate(
+                        timeout=min(PROCESS_POLL_INTERVAL_SECONDS, remaining_seconds),
+                    )
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            returncode = process.returncode
+        except Exception as exc:
+            return AgentRunbookOnlineLearningCodexRunResult(
+                stdout_text=stdout_text,
+                stderr_text=stderr_text,
+                error_detail=str(exc),
+                error_traceback="".join(
+                    traceback.format_exception(type(exc), exc, exc.__traceback__)
+                ),
+                returncode=returncode,
+                command=command,
+            )
+
+        events, usage = _parse_codex_json_events(stdout_text)
+        final_output = (
+            last_message_path.read_text(encoding="utf-8")
+            if last_message_path.exists()
+            else ""
+        )
+        error_detail = None
+        if interrupted:
+            error_detail = "Codex consolidation cancelled before completion"
+        elif timed_out:
+            error_detail = (
+                f"Codex consolidation timed out after {self.config.timeout_seconds}s"
+            )
+        elif returncode != 0:
+            error_detail = f"Codex consolidation exited with code {returncode}"
+
+        return AgentRunbookOnlineLearningCodexRunResult(
+            final_output=final_output,
+            stdout_text=stdout_text,
+            stderr_text=stderr_text,
+            events=events,
+            usage=usage,
+            error_detail=error_detail,
+            timed_out=timed_out,
+            interrupted=interrupted,
+            returncode=returncode,
+            command=command,
+        )
+
+
+@dataclass(frozen=True)
 class AgentRunbookOnlineLearningConfig:
     enabled: bool
     strategy_memory_dir: Path | None = None
+    consolidation_codex_binary: Path = DEFAULT_CODEX_BINARY
+    timeout_seconds: float = DEFAULT_CODEX_TIMEOUT_SECONDS
 
     @classmethod
     def from_params(cls, params_obj: object) -> "AgentRunbookOnlineLearningConfig":
@@ -221,7 +412,25 @@ class AgentRunbookOnlineLearningConfig:
             if isinstance(strategy_memory_dir_obj, str) and strategy_memory_dir_obj.strip()
             else None
         )
-        return cls(enabled=True, strategy_memory_dir=strategy_memory_dir)
+        codex_binary_obj = params.get("consolidation_codex_binary", str(DEFAULT_CODEX_BINARY))
+        require(
+            isinstance(codex_binary_obj, str) and codex_binary_obj.strip(),
+            "online_learning_params.consolidation_codex_binary must be a non-empty string",
+        )
+        consolidation_codex_binary = Path(codex_binary_obj).expanduser()
+        timeout_seconds_obj = params.get("timeout_seconds", DEFAULT_CODEX_TIMEOUT_SECONDS)
+        require(
+            isinstance(timeout_seconds_obj, (int, float))
+            and not isinstance(timeout_seconds_obj, bool)
+            and float(timeout_seconds_obj) > 0.0,
+            "online_learning_params.timeout_seconds must be a positive number",
+        )
+        return cls(
+            enabled=True,
+            strategy_memory_dir=strategy_memory_dir,
+            consolidation_codex_binary=consolidation_codex_binary,
+            timeout_seconds=float(timeout_seconds_obj),
+        )
 
     def to_params(self) -> dict[str, object]:
         out: dict[str, object] = {"enabled": self.enabled}
@@ -229,6 +438,8 @@ class AgentRunbookOnlineLearningConfig:
             out["strategy_memory_dir"] = (
                 str(self.strategy_memory_dir) if self.strategy_memory_dir is not None else None
             )
+            out["consolidation_codex_binary"] = str(self.consolidation_codex_binary)
+            out["timeout_seconds"] = self.timeout_seconds
         return out
 
 
@@ -476,7 +687,7 @@ class AgentRunbookOnlineLearning:
         attempt_dir: Path,
         query_trace_dir: Path | None,
         workspace_dir: Path | None,
-        runner: OaiAgentsSDKRunner,
+        consolidation_runner: AgentRunbookOnlineLearningCodexRunner,
         is_cancelled: Any | None = None,
     ) -> dict[str, Any]:
         if not self.enabled:
@@ -544,7 +755,7 @@ class AgentRunbookOnlineLearning:
         }
 
         strategy_file: Path | None = None
-        run_result = OaiAgentsSDKRunResult()
+        run_result = AgentRunbookOnlineLearningCodexRunResult()
         started_at_ts = time.time()
         try:
             strategy_file = self.ensure_strategy_file(
@@ -566,39 +777,27 @@ class AgentRunbookOnlineLearning:
 
             instruction_text = CONSOLIDATION_INSTRUCTION_PATH.read_text(encoding="utf-8")
             instruction_path.write_text(instruction_text, encoding="utf-8")
-            metadata["system_instruction_sources"] = [
-                "ONLINE_LEARNING_SYSTEM_INSTRUCTIONS",
-            ]
-            metadata["instruction_delivery"] = "attempt_file"
+            metadata["instruction_sources"] = [str(instruction_path)]
+            metadata["instruction_delivery"] = "attempt_file_and_task_prompt"
             metadata["started_at_utc"] = datetime.fromtimestamp(
                 started_at_ts,
                 timezone.utc,
             ).isoformat()
-            run_result = runner.run(
-                sandbox_dir=attempt_dir,
-                user_prompt=(
-                    "Read CONSOLIDATE_STRATEGY.md and update "
-                    "LEARNED_RETRIEVAL_STRATEGY.md. Do not modify "
-                    "sandbox/memory_module_output.json."
-                ),
-                system_instructions=ONLINE_LEARNING_SYSTEM_INSTRUCTIONS,
-                allowed_apply_patch_paths={strategy_file},
+            run_result = consolidation_runner.run(
+                attempt_dir=attempt_dir,
+                last_message_path=last_message_path,
+                is_cancelled=is_cancelled,
             )
-            last_message_path.write_text(run_result.final_output, encoding="utf-8")
-            stdout_payload = {
-                "runner": "openai_agents_sdk",
-                "final_output": run_result.final_output,
-                "tool_calls": run_result.tool_calls,
-                "usage": run_result.usage,
-            }
-            stdout_path.write_text(
-                json.dumps(stdout_payload, indent=2, ensure_ascii=True) + "\n",
-                encoding="utf-8",
-            )
-            save_json(events_path, stdout_payload)
-            stderr_path.write_text(run_result.error_traceback, encoding="utf-8")
+            if not last_message_path.exists():
+                last_message_path.write_text(run_result.final_output, encoding="utf-8")
+            stdout_path.write_text(run_result.stdout_text, encoding="utf-8")
+            save_json(events_path, run_result.events)
+            stderr_text = run_result.stderr_text
+            if run_result.error_traceback:
+                stderr_text = f"{stderr_text}\n{run_result.error_traceback}".lstrip()
+            stderr_path.write_text(stderr_text, encoding="utf-8")
 
-            failed_apply_patch_calls = _failed_apply_patch_calls(run_result.tool_calls)
+            failed_apply_patch_calls = _failed_codex_apply_patch_events(run_result.events)
             with self._lock:
                 validation_errors: list[str] = []
                 run_failed = run_result.error_detail is not None
@@ -677,8 +876,13 @@ class AgentRunbookOnlineLearning:
                     "completed_at_utc": utc_now_iso(),
                     "duration_seconds": time.time() - started_at_ts,
                     "timed_out": run_result.timed_out,
+                    "interrupted": run_result.interrupted,
                     "runner_error_detail": run_result.error_detail,
-                    "tool_call_count": len(run_result.tool_calls),
+                    "runner": "codex_cli",
+                    "command": run_result.command,
+                    "returncode": run_result.returncode,
+                    "event_count": len(run_result.events),
+                    "tool_call_count": _codex_tool_event_count(run_result.events),
                     "usage": run_result.usage,
                     "after_size_bytes": _file_size(after_snapshot_path),
                     "after_sha256": _file_sha256(after_snapshot_path),
@@ -702,8 +906,13 @@ class AgentRunbookOnlineLearning:
                     "duration_seconds": time.time() - started_at_ts,
                     "error": str(exc),
                     "timed_out": run_result.timed_out,
+                    "interrupted": run_result.interrupted,
                     "runner_error_detail": run_result.error_detail,
-                    "tool_call_count": len(run_result.tool_calls),
+                    "runner": "codex_cli",
+                    "command": run_result.command,
+                    "returncode": run_result.returncode,
+                    "event_count": len(run_result.events),
+                    "tool_call_count": _codex_tool_event_count(run_result.events),
                     "usage": run_result.usage,
                 }
             )

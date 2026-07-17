@@ -920,21 +920,6 @@ class CodexMemory(Memory):
         memory_markdown = normalized_output["memory_markdown"]
         valid_spans = normalized_output["trajectory_spans_valid"]
 
-        if "evidence_status" in normalized_output:
-            evidence_status = normalized_output["evidence_status"]
-            evidence_status_reason = normalized_output["evidence_status_reason"]
-            answer_policy = normalized_output["answer_policy"]
-            items.append(
-                {
-                    "type": "text",
-                    "value": (
-                        "## Evidence Gate\n"
-                        f"- Evidence status: `{evidence_status}`\n"
-                        f"- Answer policy: `{answer_policy}`\n"
-                        f"- Reason: {evidence_status_reason}\n"
-                    ),
-                }
-            )
         if isinstance(memory_markdown, str) and memory_markdown.strip():
             items.append({"type": "text", "value": memory_markdown.strip() + "\n"})
         if valid_spans:
