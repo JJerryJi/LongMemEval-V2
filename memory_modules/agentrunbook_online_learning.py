@@ -24,62 +24,6 @@ DEFAULT_CODEX_TIMEOUT_SECONDS = float(os.getenv("CODEX_TIMEOUT_SECONDS", "1800")
 PROCESS_POLL_INTERVAL_SECONDS = 0.25
 TERMINATION_GRACE_SECONDS = 5.0
 
-QUERY_INSTRUCTION_APPENDIX = """
-
-## Learned Retrieval Strategy
-
-If `LEARNED_RETRIEVAL_STRATEGY.md` exists, use it as private retrieval
-guidance. It may contain notes learned from previous queries across task types.
-You may read it before broad trajectory exploration and revisit it after
-inspecting the current working directory to find the most relevant note. Do not
-edit the strategy file.
-
-Each learned row's `Evidence status` describes how the previous task's cited
-evidence fit the previous task. It is provenance for that old note, not the
-evidence status for the current question, and not proof that the note should be
-used now.
-
-Use relevant learned rows as candidate search leads:
-
-- `directly_supported` means the previous task had exact positive support. For
-  the current question, use it only after current cited evidence is non-empty,
-  directly proves the requested target, matches the exact entity / actor-view /
-  page / section / field-control / workflow stage / pre-post state, and resolves
-  any UI-count, label-mapping, section-boundary, or before-after ambiguity.
-- `contradicts_premise` means the previous task had exact contradictory or
-  closed-set absence evidence. For the current question, use it only after the
-  current scoped span directly shows the named field, control, workflow, page, or
-  premise is absent or wrong. If a current closed set of options, fields, tabs,
-  buttons, or related records is visible and the requested target is absent,
-  surface that absence clearly.
-- `near_match_only` means the previous task found only a similar workflow, page,
-  actor/view, entity, field, section, time, or state. Use it only as navigation
-  or contrast; it is not answer evidence for the current question.
-- `insufficient` means the previous task lacked exact support or contradiction.
-  Use it only as a warning about missing evidence or a repeatable search trap;
-  still continue current-task exploration.
-
-Do not treat learned notes as absolute truth. Still inspect the current working
-directory and current trajectory evidence to decide whether any note is helpful
-for this question.
-
-This appendix does not change the output JSON schema. `memory_markdown` and
-`trajectory_spans` are the final filtered memory context:
-
-- Include only current verified evidence and concise reasoning that should be
-  used for the current question. If a learned note guided the search, mention it
-  only when useful and only after current cited evidence verifies the point.
-- Omit rejected notes.
-- Usually omit `near_match_only` notes and spans; include them only when useful
-  as clearly labeled reference or contrast.
-- For `contradicts_premise`, clearly state the false premise and cite the exact
-  scoped absence or contradiction. If a closed set proves the requested target is
-  absent, describe that absence directly instead of treating the evidence as
-  missing.
-- Never pass along answer-like text from a learned note unless current cited
-  evidence independently verifies it.
-"""
-
 
 def require(condition: bool, message: str) -> None:
     if not condition:
@@ -449,6 +393,7 @@ class AgentRunbookOnlineLearning:
         self._lock = threading.Lock()
         self._attempt_metadata: dict[str, dict[str, Any]] = {}
         self._latest_successful_attempt_by_question: dict[str, Path] = {}
+        self._loaded_strategy_memory_dir: Path | None = None
         if config.enabled:
             require(
                 CONSOLIDATION_INSTRUCTION_PATH.exists(),
@@ -463,6 +408,14 @@ class AgentRunbookOnlineLearning:
     def enabled(self) -> bool:
         return self.config.enabled
 
+    def bind_loaded_strategy_memory_dir(self, strategy_memory_dir: Path) -> None:
+        if not self.enabled or self.config.strategy_memory_dir is not None:
+            return None
+        strategy_file = strategy_memory_dir.resolve() / STRATEGY_FILENAME
+        if strategy_file.exists():
+            self._loaded_strategy_memory_dir = strategy_file.parent
+        return None
+
     def strategy_memory_dir(
         self,
         *,
@@ -471,6 +424,8 @@ class AgentRunbookOnlineLearning:
     ) -> Path:
         if self.config.strategy_memory_dir is not None:
             return self.config.strategy_memory_dir
+        if self._loaded_strategy_memory_dir is not None:
+            return self._loaded_strategy_memory_dir
         if query_trace_dir is not None:
             return query_trace_dir.parent / "strategy_memory"
         require(
@@ -951,5 +906,7 @@ class AgentRunbookOnlineLearning:
         if strategy_file.exists():
             target_dir = output_dir / "strategy_memory"
             target_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(strategy_file, target_dir / STRATEGY_FILENAME)
+            target_file = target_dir / STRATEGY_FILENAME
+            if strategy_file.resolve() != target_file.resolve():
+                shutil.copy2(strategy_file, target_file)
         return None

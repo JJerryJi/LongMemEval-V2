@@ -381,28 +381,71 @@ class ShellExecutor:
             )
             return False, stdout_bytes, stderr_bytes
         except asyncio.TimeoutError:
-            self._terminate_process_group(proc, force=False)
+            stdout_bytes, stderr_bytes = await self._terminate_and_collect_output(
+                proc,
+                communicate_task,
+                cleanup_failure_message=b"shell command timed out and cleanup did not finish",
+            )
+            return True, stdout_bytes, stderr_bytes
+        except asyncio.CancelledError:
+            await self._terminate_cancelled_process(proc, communicate_task)
+            raise
+
+    async def _terminate_and_collect_output(
+        self,
+        proc: asyncio.subprocess.Process,
+        communicate_task: asyncio.Task[tuple[bytes | str | None, bytes | str | None]],
+        *,
+        cleanup_failure_message: bytes,
+    ) -> tuple[bytes | str | None, bytes | str | None]:
+        self._terminate_process_group(proc, force=False)
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(communicate_task),
+                timeout=TIMEOUT_CLEANUP_GRACE_SECONDS,
+            )
+        except asyncio.CancelledError:
+            self._terminate_process_group(proc, force=True)
+            communicate_task.cancel()
+            raise
+        except asyncio.TimeoutError:
+            self._terminate_process_group(proc, force=True)
             try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                return await asyncio.wait_for(
                     asyncio.shield(communicate_task),
                     timeout=TIMEOUT_CLEANUP_GRACE_SECONDS,
                 )
-                return True, stdout_bytes, stderr_bytes
-            except asyncio.TimeoutError:
+            except asyncio.CancelledError:
                 self._terminate_process_group(proc, force=True)
+                communicate_task.cancel()
+                raise
+            except asyncio.TimeoutError:
+                communicate_task.cancel()
                 try:
-                    stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                        asyncio.shield(communicate_task),
-                        timeout=TIMEOUT_CLEANUP_GRACE_SECONDS,
-                    )
-                    return True, stdout_bytes, stderr_bytes
-                except asyncio.TimeoutError:
-                    communicate_task.cancel()
-                    try:
-                        await communicate_task
-                    except asyncio.CancelledError:
-                        pass
-                    return True, b"", b"shell command timed out and cleanup did not finish"
+                    await communicate_task
+                except asyncio.CancelledError:
+                    pass
+                return b"", cleanup_failure_message
+
+    async def _terminate_cancelled_process(
+        self,
+        proc: asyncio.subprocess.Process,
+        communicate_task: asyncio.Task[tuple[bytes | str | None, bytes | str | None]],
+    ) -> None:
+        try:
+            await self._terminate_and_collect_output(
+                proc,
+                communicate_task,
+                cleanup_failure_message=b"shell command cancelled and cleanup did not finish",
+            )
+        except asyncio.CancelledError:
+            self._terminate_process_group(proc, force=True)
+            communicate_task.cancel()
+            raise
+        except Exception:
+            self._terminate_process_group(proc, force=True)
+            communicate_task.cancel()
+        return None
 
     def _terminate_process_group(
         self,

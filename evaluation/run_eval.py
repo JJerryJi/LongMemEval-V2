@@ -110,10 +110,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--openai-sdk-tool-timeout-seconds", type=float, default=float(os.getenv("OPENAI_SDK_TOOL_TIMEOUT_SECONDS", "30")))
     parser.add_argument("--openai-sdk-max-tool-output-chars", type=int, default=int(os.getenv("OPENAI_SDK_MAX_TOOL_OUTPUT_CHARS", "1048576")))
     parser.add_argument(
-        "--openai-sdk-online-learning",
+        "--enable-online-learning",
         action=argparse.BooleanOptionalAction,
         default=env_bool("OPENAI_SDK_ONLINE_LEARNING", False),
         help="Enable online learned retrieval strategy for agentrunbook_c_v2.",
+    )
+    parser.add_argument(
+        "--openai-sdk-online-learning",
+        action=argparse.BooleanOptionalAction,
+        default=argparse.SUPPRESS,
+        dest="enable_online_learning",
+        help=argparse.SUPPRESS,
     )
 
     parser.add_argument("--evaluator-model", default=os.getenv("EVALUATOR_MODEL", "gpt-5.2"))
@@ -244,7 +251,7 @@ def build_memory_config(args: argparse.Namespace, data_root: Path) -> dict[str, 
             "trajectory_pool_root": None,
             "query_openai_sdk_params": openai_sdk_query_params(args),
         }
-        if args.openai_sdk_online_learning:
+        if args.enable_online_learning:
             memory_params["online_learning_params"] = {
                 "enabled": True,
                 "strategy_memory_dir": None,
@@ -268,10 +275,10 @@ def build_memory_config(args: argparse.Namespace, data_root: Path) -> dict[str, 
 
 def main() -> None:
     args = parse_args()
-    if args.openai_sdk_online_learning and args.method != "agentrunbook_c_v2":
-        raise SystemExit("--openai-sdk-online-learning is only supported with --method agentrunbook_c_v2")
-    if args.openai_sdk_online_learning and args.prompt_build_max_workers != 1:
-        raise SystemExit("--openai-sdk-online-learning requires --prompt-build-max-workers 1 for sequential online learning")
+    if args.enable_online_learning and args.method != "agentrunbook_c_v2":
+        raise SystemExit("--enable-online-learning is only supported with --method agentrunbook_c_v2")
+    if args.enable_online_learning and args.prompt_build_max_workers != 1:
+        raise SystemExit("--enable-online-learning requires --prompt-build-max-workers 1 for sequential online learning")
     data_root = Path(args.data_root).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     runtime_dir = output_dir / "runtime_inputs"

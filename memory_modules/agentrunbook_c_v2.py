@@ -20,7 +20,6 @@ from .agentrunbook_online_learning import (
     AgentRunbookOnlineLearningCodexConfig,
     AgentRunbookOnlineLearningCodexRunner,
     AgentRunbookOnlineLearningConfig,
-    QUERY_INSTRUCTION_APPENDIX,
 )
 from .oai_agents_sdk import (
     OaiAgentsSDKRunner,
@@ -30,6 +29,63 @@ from .oai_agents_sdk import (
     ensure_positive_int,
     ensure_string,
 )
+
+
+QUERY_INSTRUCTION_APPENDIX = """
+
+## Learned Retrieval Strategy
+
+If `LEARNED_RETRIEVAL_STRATEGY.md` exists, use it as private retrieval
+guidance. It may contain notes learned from previous queries across task types.
+You may read it before broad trajectory exploration and revisit it after
+inspecting the current working directory to find the most relevant note. Do not
+edit the strategy file.
+
+Each learned row's `Evidence status` describes how the previous task's cited
+evidence fit the previous task. It is provenance for that old note, not the
+evidence status for the current question, and not proof that the note should be
+used now.
+
+Use relevant learned rows as candidate search leads:
+
+- `directly_supported` means the previous task had exact positive support. For
+  the current question, use it only after current cited evidence is non-empty,
+  directly proves the requested target, matches the exact entity / actor-view /
+  page / section / field-control / workflow stage / pre-post state, and resolves
+  any UI-count, label-mapping, section-boundary, or before-after ambiguity.
+- `contradicts_premise` means the previous task had exact contradictory or
+  closed-set absence evidence. For the current question, use it only after the
+  current scoped span directly shows the named field, control, workflow, page, or
+  premise is absent or wrong. If a current closed set of options, fields, tabs,
+  buttons, or related records is visible and the requested target is absent,
+  surface that absence clearly.
+- `near_match_only` means the previous task found only a similar workflow, page,
+  actor/view, entity, field, section, time, or state. Use it only as navigation
+  or contrast; it is not answer evidence for the current question.
+- `insufficient` means the previous task lacked exact support or contradiction.
+  Use it only as a warning about missing evidence or a repeatable search trap;
+  still continue current-task exploration.
+
+Do not treat learned notes as absolute truth. Still inspect the current working
+directory and current trajectory evidence to decide whether any note is helpful
+for this question.
+
+This appendix does not change the output JSON schema. `memory_markdown` and
+`trajectory_spans` are the final filtered memory context:
+
+- Include only current verified evidence and concise reasoning that should be
+  used for the current question. If a learned note guided the search, mention it
+  only when useful and only after current cited evidence verifies the point.
+- Omit rejected notes.
+- Usually omit `near_match_only` notes and spans; include them only when useful
+  as clearly labeled reference or contrast.
+- For `contradicts_premise`, clearly state the false premise and cite the exact
+  scoped absence or contradiction. If a closed set proves the requested target is
+  absent, describe that absence directly instead of treating the evidence as
+  missing.
+- Never pass along answer-like text from a learned note unless current cited
+  evidence independently verifies it.
+"""
 
 
 @register_memory
@@ -633,4 +689,9 @@ class AgentRunbookCV2(AgentRunbookC):
             query_trace_dir=self.query_trace_dir,
             workspace_dir=self.workspace_dir,
         )
+        return None
+
+    def _load_backend(self, input_dir: Path) -> None:
+        super()._load_backend(input_dir)
+        self.online_learning.bind_loaded_strategy_memory_dir(input_dir / "strategy_memory")
         return None
